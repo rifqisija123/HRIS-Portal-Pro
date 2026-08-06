@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "519178244513",
+    "project_id": "flutter-hris-app",
+    "storage_bucket": "flutter-hris-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:519178244513:android:fcea0d012e1dd3b87cfbe0",
+        "android_client_info": {
+          "package_name": "com.example.flutter_test_application"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC1z_jWqDzSwPSJxf2FUz990Nq06S5QqeY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
