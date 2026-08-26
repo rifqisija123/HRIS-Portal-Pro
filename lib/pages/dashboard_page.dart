@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'attendance_page.dart';
 import 'attendance_history_page.dart';
 import 'notification_page.dart';
 import '../data/holiday_data.dart';
 import 'settings_page.dart';
+
 final ValueNotifier<bool> isDarkModeNotifier = ValueNotifier<bool>(false);
+final ValueNotifier<String?> profilePhotoNotifier = ValueNotifier<String?>(null);
 
 class AppColors {
   static ThemeColors get current => isDarkModeNotifier.value ? ThemeColors.dark : ThemeColors.light;
@@ -139,22 +145,33 @@ class ThemeColors {
 }
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key});
+  final int initialIndex;
+  const DashboardPage({super.key, this.initialIndex = 0});
 
   @override
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  int _currentIndex = 0;
+  late int _currentIndex;
   late DateTime _displayedMonth;
   bool _isDarkMode = false;
 
   @override
   void initState() {
     super.initState();
+    _currentIndex = widget.initialIndex;
     final now = DateTime.now();
     _displayedMonth = DateTime(now.year, now.month, 1);
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      FirebaseDatabase.instance.ref().child('users').child(user.uid).child('profile_photo').onValue.listen((event) {
+        if (event.snapshot.value != null && event.snapshot.value is String) {
+          profilePhotoNotifier.value = event.snapshot.value as String;
+        }
+      });
+    }
   }
 
   @override
@@ -229,18 +246,36 @@ class _DashboardPageState extends State<DashboardPage> {
         children: [
           Row(
             children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: theme.primaryContainer, width: 2),
-                  image: const DecorationImage(
-                    image: NetworkImage(
-                        'https://lh3.googleusercontent.com/aida-public/AB6AXuCalfK_8lG7uaRXApW1OwdK-HnwRc9FlbgbVdH0gG-_8bngw4GdcRQE9edwen2Gh2VRrkyiBBoP849THdl4c1KQ6MtYYMUITpGRmsGCs10_9mp3RGCGgef9HKpZfb1R1JBm5zj_2wOva5ECaZbErD3BnhgVMXYw_YQcFKe7CeHQ8tpoLfgA1_BI4A-rgm0IUajy7LtnSeqV8lV3Q1tNf8L54AH4dkT5HPe22z_y6Iv_O_FxySKmC8L-'),
-                    fit: BoxFit.cover,
-                  ),
-                ),
+              ValueListenableBuilder<String?>(
+                valueListenable: profilePhotoNotifier,
+                builder: (context, photoBase64, child) {
+                  ImageProvider imageProvider;
+                  if (photoBase64 != null && photoBase64.isNotEmpty) {
+                    try {
+                      final Uint8List bytes = base64Decode(photoBase64);
+                      imageProvider = MemoryImage(bytes);
+                    } catch (_) {
+                      imageProvider = const NetworkImage(
+                          'https://lh3.googleusercontent.com/aida-public/AB6AXuCalfK_8lG7uaRXApW1OwdK-HnwRc9FlbgbVdH0gG-_8bngw4GdcRQE9edwen2Gh2VRrkyiBBoP849THdl4c1KQ6MtYYMUITpGRmsGCs10_9mp3RGCGgef9HKpZfb1R1JBm5zj_2wOva5ECaZbErD3BnhgVMXYw_YQcFKe7CeHQ8tpoLfgA1_BI4A-rgm0IUajy7LtnSeqV8lV3Q1tNf8L54AH4dkT5HPe22z_y6Iv_O_FxySKmC8L-');
+                    }
+                  } else {
+                    imageProvider = const NetworkImage(
+                        'https://lh3.googleusercontent.com/aida-public/AB6AXuCalfK_8lG7uaRXApW1OwdK-HnwRc9FlbgbVdH0gG-_8bngw4GdcRQE9edwen2Gh2VRrkyiBBoP849THdl4c1KQ6MtYYMUITpGRmsGCs10_9mp3RGCGgef9HKpZfb1R1JBm5zj_2wOva5ECaZbErD3BnhgVMXYw_YQcFKe7CeHQ8tpoLfgA1_BI4A-rgm0IUajy7LtnSeqV8lV3Q1tNf8L54AH4dkT5HPe22z_y6Iv_O_FxySKmC8L-');
+                  }
+
+                  return Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: theme.primaryContainer, width: 2),
+                      image: DecorationImage(
+                        image: imageProvider,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  );
+                },
               ),
               const SizedBox(width: 12),
               Text(
@@ -381,329 +416,392 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  String _getFormattedTodayDate() {
+    final now = DateTime.now();
+    const days = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
+    const months = [
+      'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+      'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+    ];
+    final dayName = days[now.weekday - 1];
+    final monthName = months[now.month - 1];
+    return '$dayName, ${now.day} $monthName ${now.year}';
+  }
+
+  String _getTodayKey() {
+    final now = DateTime.now();
+    return "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+  }
+
   Widget _buildAttendanceCard(ThemeColors theme) {
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: theme.surfaceContainerLowest,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
-          )
-        ],
-      ),
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Positioned(
-            right: -10,
-            top: -10,
-            child: Icon(
-              Icons.check_circle,
-              size: 80,
-              color: theme.secondary.withOpacity(0.1),
-            ),
+    final user = FirebaseAuth.instance.currentUser;
+    final dateKey = _getTodayKey();
+    final formattedDate = _getFormattedTodayDate();
+
+    final Stream? stream = user != null
+        ? FirebaseDatabase.instance.ref().child('attendances').child(user.uid).child(dateKey).onValue
+        : null;
+
+    return StreamBuilder(
+      stream: stream,
+      builder: (context, AsyncSnapshot snapshot) {
+        String checkInTime = '--:--:-- WIB';
+        String checkOutTime = '--:--:-- WIB';
+        String locationName = '-';
+        String totalWorkTime = '-';
+        bool hasCheckIn = false;
+        bool hasCheckOut = false;
+
+        if (snapshot.hasData && snapshot.data?.snapshot.value != null && snapshot.data!.snapshot.value is Map) {
+          final data = Map<String, dynamic>.from(snapshot.data!.snapshot.value as Map);
+          if (data['check_in_time'] != null) {
+            checkInTime = data['check_in_time'].toString();
+            hasCheckIn = true;
+          }
+          if (data['check_out_time'] != null) {
+            checkOutTime = data['check_out_time'].toString();
+            hasCheckOut = true;
+          }
+          if (data['location_name'] != null && data['location_name'].toString().isNotEmpty) {
+            locationName = data['location_name'].toString();
+          }
+          if (data['total_work_time'] != null && data['total_work_time'].toString().isNotEmpty) {
+            totalWorkTime = data['total_work_time'].toString();
+          }
+        }
+
+        final statusText = hasCheckOut
+            ? 'Presensi Pulang Berhasil'
+            : (hasCheckIn ? 'Presensi Masuk Berhasil' : 'Belum Presensi');
+
+        final statusBadge = hasCheckOut
+            ? 'SELESAI'
+            : (hasCheckIn ? 'HADIR' : 'BELUM ABSEN');
+
+        return Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: theme.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
+              )
+            ],
           ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Stack(
+            clipBehavior: Clip.none,
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              Positioned(
+                right: -10,
+                top: -10,
+                child: Icon(
+                  Icons.check_circle,
+                  size: 80,
+                  color: (hasCheckIn ? theme.secondary : theme.outline).withOpacity(0.1),
+                ),
+              ),
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Column(
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Presensi Hari Ini',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w600,
-                          color: theme.onSurface,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Selasa, 21 Juli 2026',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: theme.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: theme.secondary,
-                              shape: BoxShape.circle,
+                          Text(
+                            'Presensi Hari Ini',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w600,
+                              color: theme.onSurface,
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(height: 4),
                           Text(
-                            'Presensi Berhasil',
+                            formattedDate,
                             style: TextStyle(
                               fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              color: theme.secondary,
+                              fontWeight: FontWeight.w600,
+                              color: theme.onSurfaceVariant,
                             ),
+                          ),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: hasCheckIn ? theme.secondary : theme.outline,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                statusText,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: hasCheckIn ? theme.secondary : theme.outline,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: (hasCheckIn ? theme.secondaryContainer : theme.surfaceContainerHigh).withOpacity(0.5),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: hasCheckIn ? theme.secondaryContainer : theme.outlineVariant),
+                        ),
+                        child: Text(
+                          statusBadge,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: hasCheckIn ? theme.onSecondaryContainer : theme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
                     ],
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: theme.secondaryContainer.withOpacity(0.3),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: theme.secondaryContainer),
-                    ),
-                    child: Text(
-                      'SUKSES',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: theme.onSecondaryContainer,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: theme.secondaryContainer.withOpacity(0.3),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Icon(Icons.login, color: theme.secondary, size: 20),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'JAM MULAI KERJA',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
-                                  color: theme.onSurfaceVariant,
-                                  letterSpacing: 0.5,
-                                ),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 2),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerLeft,
-                                child: Text(
-                                  '08:45 WIB',
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w600,
-                                    color: theme.primary,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: theme.error.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Icon(Icons.logout, color: theme.error, size: 20),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'JAM SELESAI KERJA',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
-                                  color: theme.onSurfaceVariant,
-                                  letterSpacing: 0.5,
-                                ),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 2),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerLeft,
-                                child: Text(
-                                  '--:-- WIB',
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w600,
-                                    color: theme.outline,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'LOKASI PRESENSI',
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: theme.onSurfaceVariant,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Container(
-                              width: 40,
-                              height: 40,
-                              decoration: BoxDecoration(
-                                color: theme.primary.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Icon(Icons.location_on, color: theme.primary, size: 20),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Gelora Bung Karno',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: theme.onSurfaceVariant,
-                                ),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'TOTAL WAKTU KERJA',
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: theme.onSurfaceVariant,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Container(
-                              width: 40,
-                              height: 40,
-                              decoration: BoxDecoration(
-                                color: theme.tertiary.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Icon(Icons.timer, color: theme.tertiary, size: 20),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                '0H 0M 0S',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.bold,
-                                  color: theme.onSurfaceVariant,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16.0),
-                child: Divider(color: theme.outlineVariant, height: 1, thickness: 0.5),
-              ),
-              InkWell(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => const AttendanceHistoryPage()),
-                  );
-                },
-                borderRadius: BorderRadius.circular(8),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8.0),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  const SizedBox(height: 24),
+                  Row(
                     children: [
-                      Text(
-                        'Lihat Riwayat Presensi',
-                        style: TextStyle(
-                          color: theme.primary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: theme.secondaryContainer.withOpacity(0.3),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Icon(Icons.login, color: theme.secondary, size: 20),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'JAM MULAI KERJA',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color: theme.onSurfaceVariant,
+                                      letterSpacing: 0.5,
+                                    ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      checkInTime,
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                        color: hasCheckIn ? theme.primary : theme.outline,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 4),
-                      Icon(Icons.chevron_right, color: theme.primary, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: theme.error.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Icon(Icons.logout, color: theme.error, size: 20),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'JAM SELESAI KERJA',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color: theme.onSurfaceVariant,
+                                      letterSpacing: 0.5,
+                                    ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      checkOutTime,
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                        color: hasCheckOut ? theme.primary : theme.outline,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
-                ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'LOKASI PRESENSI',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: theme.onSurfaceVariant,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: theme.primary.withOpacity(0.1),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Icon(Icons.location_on, color: theme.primary, size: 20),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    locationName,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      color: theme.onSurfaceVariant,
+                                    ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'TOTAL WAKTU KERJA',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: theme.onSurfaceVariant,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: theme.tertiary.withOpacity(0.1),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Icon(Icons.timer, color: theme.tertiary, size: 20),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    totalWorkTime,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: theme.onSurfaceVariant,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16.0),
+                    child: Divider(color: theme.outlineVariant, height: 1, thickness: 0.5),
+                  ),
+                  InkWell(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => const AttendanceHistoryPage()),
+                      );
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            'Lihat Riwayat Presensi',
+                            style: TextStyle(
+                              color: theme.primary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(Icons.chevron_right, color: theme.primary, size: 20),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 

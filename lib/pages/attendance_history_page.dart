@@ -1,5 +1,84 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'dashboard_page.dart';
+
+class AttendanceRecord {
+  final String dateKey;
+  final DateTime date;
+  final String checkInTime;
+  final String checkOutTime;
+  final String status;
+  final bool isLate;
+  final String? lateDuration;
+  final String location;
+  final String totalTime;
+
+  AttendanceRecord({
+    required this.dateKey,
+    required this.date,
+    required this.checkInTime,
+    required this.checkOutTime,
+    required this.status,
+    required this.isLate,
+    this.lateDuration,
+    required this.location,
+    required this.totalTime,
+  });
+
+  static String _formatTotalWorkTime(String? rawTime) {
+    if (rawTime == null || rawTime.isEmpty || rawTime == '-') {
+      return '-';
+    }
+    return rawTime
+        .replaceAll('H', ' Jam')
+        .replaceAll('M', ' Menit')
+        .replaceAll('S', ' Detik');
+  }
+
+  factory AttendanceRecord.fromMap(String key, Map<dynamic, dynamic> map) {
+    DateTime parsedDate;
+    try {
+      final parts = key.split('-');
+      parsedDate = DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
+    } catch (_) {
+      parsedDate = DateTime.now();
+    }
+
+    final String checkIn = map['check_in_time']?.toString() ?? '-';
+    final String? checkOutRaw = map['check_out_time']?.toString();
+    final String checkOut = (checkOutRaw != null && checkOutRaw.isNotEmpty) ? checkOutRaw : 'Belum Pulang';
+
+    final String statusStr = map['status']?.toString() ?? 'Hadir';
+    final bool isLateBool = statusStr.toLowerCase().contains('telat') || (map['is_late'] == true);
+    final String? lateDur = map['late_duration']?.toString();
+
+    String loc = map['location_name']?.toString() ?? '';
+    final String locAddr = map['location_address']?.toString() ?? '';
+    if (loc.isEmpty && locAddr.isNotEmpty) {
+      loc = locAddr;
+    } else if (loc.isEmpty) {
+      loc = 'Lokasi Tidak Diketahui';
+    } else if (locAddr.isNotEmpty && locAddr != loc) {
+      loc = '$loc, $locAddr';
+    }
+
+    final String rawTotalWork = map['total_work_time']?.toString() ?? '';
+    final String totalWork = _formatTotalWorkTime(rawTotalWork);
+
+    return AttendanceRecord(
+      dateKey: key,
+      date: parsedDate,
+      checkInTime: checkIn,
+      checkOutTime: checkOut,
+      status: statusStr,
+      isLate: isLateBool,
+      lateDuration: lateDur,
+      location: loc,
+      totalTime: totalWork,
+    );
+  }
+}
 
 class AttendanceHistoryPage extends StatefulWidget {
   const AttendanceHistoryPage({super.key});
@@ -11,8 +90,54 @@ class AttendanceHistoryPage extends StatefulWidget {
 class _AttendanceHistoryPageState extends State<AttendanceHistoryPage> {
   String _selectedFilter = 'Semua';
 
+  String _formatIndonesianDate(String dateKey) {
+    try {
+      final parts = dateKey.split('-');
+      if (parts.length == 3) {
+        final year = int.parse(parts[0]);
+        final month = int.parse(parts[1]);
+        final day = int.parse(parts[2]);
+        final dt = DateTime(year, month, day);
+
+        const days = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
+        const months = [
+          'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+          'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+        ];
+        final dayName = days[dt.weekday - 1];
+        final monthName = months[dt.month - 1];
+        return '$dayName, ${dt.day} $monthName ${dt.year}';
+      }
+    } catch (_) {}
+    return dateKey;
+  }
+
+  bool _matchesFilter(AttendanceRecord record, String filter, DateTime todayDate) {
+    final recordDate = DateTime(record.date.year, record.date.month, record.date.day);
+    final diffDays = todayDate.difference(recordDate).inDays;
+
+    if (filter == 'Semua') return true;
+    if (filter == 'Hari Ini') return diffDays == 0;
+    if (filter == 'Kemarin') return diffDays == 1;
+    if (filter == 'Minggu Lalu') return diffDays >= 0 && diffDays <= 7;
+    if (filter == 'Bulan Lalu') return diffDays >= 0 && diffDays <= 30;
+    return true;
+  }
+
+  String _getSectionTitle(DateTime recordDate, DateTime todayDate) {
+    final rDate = DateTime(recordDate.year, recordDate.month, recordDate.day);
+    final diffDays = todayDate.difference(rDate).inDays;
+    if (diffDays == 0) return 'Hari Ini';
+    if (diffDays == 1) return 'Kemarin';
+    if (diffDays > 1 && diffDays <= 7) return 'Minggu Lalu';
+    if (diffDays > 7 && diffDays <= 30) return 'Bulan Lalu';
+    return 'Sebelumnya';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+
     return Scaffold(
       backgroundColor: AppColors.surface, // Match dashboard
       appBar: AppBar(
@@ -37,69 +162,132 @@ class _AttendanceHistoryPageState extends State<AttendanceHistoryPage> {
           children: [
             _buildFilterTabs(),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.all(16.0),
-                children: [
-                  if (_selectedFilter == 'Semua' || _selectedFilter == 'Hari Ini') ...[
-                    _buildSectionHeader('Hari Ini'),
-                    const SizedBox(height: 16),
-                    const HistoryItemCard(
-                      date: 'Senin, 24 Juli 2026',
-                      timeAndLocation: '08:45:00 - 17:00:00 WIB',
-                      status: 'Hadir',
-                      isLate: false,
+              child: user == null
+                  ? const Center(child: Text('Pengguna belum terautentikasi.'))
+                  : StreamBuilder<DatabaseEvent>(
+                      stream: FirebaseDatabase.instance
+                          .ref()
+                          .child('attendances')
+                          .child(user.uid)
+                          .onValue,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState == ConnectionState.waiting) {
+                          return const Center(child: CircularProgressIndicator());
+                        }
+
+                        if (snapshot.hasError) {
+                          return Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16.0),
+                              child: Text(
+                                'Gagal memuat riwayat: ${snapshot.error}',
+                                style: TextStyle(color: AppColors.error),
+                              ),
+                            ),
+                          );
+                        }
+
+                        final data = snapshot.data?.snapshot.value;
+                        if (data == null || data is! Map) {
+                          return _buildEmptyState();
+                        }
+
+                        final Map<dynamic, dynamic> attendancesMap = data;
+                        final List<AttendanceRecord> records = [];
+
+                        attendancesMap.forEach((key, value) {
+                          if (value is Map) {
+                            records.add(AttendanceRecord.fromMap(key.toString(), value));
+                          }
+                        });
+
+                        records.sort((a, b) => b.dateKey.compareTo(a.dateKey));
+
+                        final now = DateTime.now();
+                        final todayDate = DateTime(now.year, now.month, now.day);
+
+                        final filteredRecords = records
+                            .where((r) => _matchesFilter(r, _selectedFilter, todayDate))
+                            .toList();
+
+                        if (filteredRecords.isEmpty) {
+                          return _buildEmptyState();
+                        }
+
+                        final Map<String, List<AttendanceRecord>> grouped = {};
+                        for (var record in filteredRecords) {
+                          final section = _getSectionTitle(record.date, todayDate);
+                          grouped.putIfAbsent(section, () => []).add(record);
+                        }
+
+                        return ListView(
+                          padding: const EdgeInsets.all(16.0),
+                          children: grouped.entries.expand((entry) {
+                            final sectionTitle = entry.key;
+                            final items = entry.value;
+
+                            return [
+                              _buildSectionHeader(sectionTitle),
+                              const SizedBox(height: 16),
+                              ...items.map((item) {
+                                final timeStr = item.checkOutTime == 'Belum Pulang'
+                                    ? '${item.checkInTime} - Belum Pulang'
+                                    : '${item.checkInTime} - ${item.checkOutTime}';
+
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 12.0),
+                                  child: HistoryItemCard(
+                                    date: _formatIndonesianDate(item.dateKey),
+                                    timeAndLocation: timeStr,
+                                    status: item.status,
+                                    isLate: item.isLate,
+                                    lateDuration: item.lateDuration,
+                                    location: item.location,
+                                    totalTime: item.totalTime,
+                                  ),
+                                );
+                              }),
+                              const SizedBox(height: 16),
+                            ];
+                          }).toList(),
+                        );
+                      },
                     ),
-                    const SizedBox(height: 24),
-                  ],
-                  if (_selectedFilter == 'Semua' || _selectedFilter == 'Kemarin') ...[
-                    _buildSectionHeader('Kemarin'),
-                    const SizedBox(height: 16),
-                    const HistoryItemCard(
-                      date: 'Selasa, 23 Juli 2026',
-                      timeAndLocation: '08:45:00 - 17:00:00 WIB',
-                      status: 'Hadir',
-                      isLate: false,
-                    ),
-                    const SizedBox(height: 12),
-                    const HistoryItemCard(
-                      date: 'Jumat, 22 Juli 2026',
-                      timeAndLocation: '08:45:00 - 17:00:00 WIB',
-                      status: 'Hadir',
-                      isLate: false,
-                    ),
-                    const SizedBox(height: 24),
-                  ],
-                  if (_selectedFilter == 'Semua' || _selectedFilter == 'Minggu Lalu') ...[
-                    _buildSectionHeader('Minggu Lalu'),
-                    const SizedBox(height: 16),
-                    const HistoryItemCard(
-                      date: 'Jumat, 21 Juli 2026',
-                      timeAndLocation: '08:45:00 - 17:00:00 WIB',
-                      status: 'Hadir',
-                      isLate: false,
-                    ),
-                    const SizedBox(height: 12),
-                    const HistoryItemCard(
-                      date: 'Kamis, 20 Juli 2026',
-                      timeAndLocation: '09:00:00 - 17:00:00 WIB',
-                      status: 'Telat',
-                      isLate: true,
-                      lateDuration: '15 Menit',
-                    ),
-                    const SizedBox(height: 24),
-                  ],
-                  if (_selectedFilter == 'Semua' || _selectedFilter == 'Bulan Lalu') ...[
-                    _buildSectionHeader('Bulan Lalu'),
-                    const SizedBox(height: 16),
-                    const HistoryItemCard(
-                      date: 'Rabu, 21 Juni 2026',
-                      timeAndLocation: '09:55:00 - 17:00:00 WIB',
-                      status: 'Telat',
-                      isLate: true,
-                      lateDuration: '1 Jam 10 Menit',
-                    ),
-                  ],
-                ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.history_outlined,
+              size: 72,
+              color: AppColors.outline.withValues(alpha: 0.5),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Belum Ada Riwayat Presensi',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: AppColors.onSurface,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Data riwayat presensi Anda akan muncul di sini setelah Anda melakukan presensi.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                color: AppColors.outline,
               ),
             ),
           ],
@@ -215,7 +403,7 @@ class _HistoryItemCardState extends State<HistoryItemCard> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 20,
             offset: const Offset(0, 4),
           )
@@ -239,7 +427,7 @@ class _HistoryItemCardState extends State<HistoryItemCard> {
                         width: 48,
                         height: 48,
                         decoration: BoxDecoration(
-                          color: widget.isLate ? AppColors.error.withOpacity(0.1) : AppColors.secondaryContainer.withOpacity(0.3),
+                          color: widget.isLate ? AppColors.error.withValues(alpha: 0.1) : AppColors.secondaryContainer.withValues(alpha: 0.3),
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
@@ -294,7 +482,7 @@ class _HistoryItemCardState extends State<HistoryItemCard> {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
-                        color: widget.isLate ? AppColors.error.withOpacity(0.1) : AppColors.secondaryContainer.withOpacity(0.3),
+                        color: widget.isLate ? AppColors.error.withValues(alpha: 0.1) : AppColors.secondaryContainer.withValues(alpha: 0.3),
                         borderRadius: BorderRadius.circular(100),
                       ),
                       child: Text(
@@ -391,4 +579,3 @@ class _HistoryItemCardState extends State<HistoryItemCard> {
     );
   }
 }
-

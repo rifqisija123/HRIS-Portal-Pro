@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import '../services/face_recognition_service.dart';
 import 'dashboard_page.dart';
 
 class AttendancePage extends StatefulWidget {
@@ -24,6 +29,12 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
   bool _isProcessing = false;
   CameraController? _cameraController;
   String? _errorMessage;
+
+  bool _isCheckingFaceRegistration = true;
+  bool _hasRegisteredFace = false;
+  bool _isAttendanceCompleted = false;
+  Map<String, dynamic>? _todayAttendanceData;
+  final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
 
   bool _isLoadingLocation = true;
   LatLng? _currentPosition;
@@ -54,8 +65,252 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
       }
     });
 
+    _faceRecognitionService.initialize();
+    _checkFaceRegistration();
     _initializeCamera();
     _fetchLocation();
+  }
+
+  String _getTodayKey() {
+    final now = DateTime.now();
+    return "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+  }
+
+  Future<void> _checkFaceRegistration() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        final regSnapshot = await FirebaseDatabase.instance
+            .ref()
+            .child('users')
+            .child(user.uid)
+            .child('has_registered_face')
+            .get()
+            .timeout(const Duration(seconds: 5));
+
+        if (regSnapshot.exists && regSnapshot.value == true) {
+          final dateKey = _getTodayKey();
+          final attSnapshot = await FirebaseDatabase.instance
+              .ref()
+              .child('attendances')
+              .child(user.uid)
+              .child(dateKey)
+              .get()
+              .timeout(const Duration(seconds: 5));
+
+          Map<String, dynamic>? attData;
+          if (attSnapshot.exists && attSnapshot.value != null && attSnapshot.value is Map) {
+            attData = Map<String, dynamic>.from(attSnapshot.value as Map);
+          }
+
+          final bool isCompleted = attData != null && attData['check_in_time'] != null && attData['check_out_time'] != null;
+
+          if (mounted) {
+            setState(() {
+              _hasRegisteredFace = true;
+              _todayAttendanceData = attData;
+              _isAttendanceCompleted = isCompleted;
+              _isCheckingFaceRegistration = false;
+            });
+          }
+
+          if (isCompleted) {
+            _showAttendanceLimitReachedDialog();
+          }
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking face registration: $e');
+    }
+
+    if (mounted) {
+      setState(() {
+        _hasRegisteredFace = false;
+        _isCheckingFaceRegistration = false;
+      });
+      _showFaceNotRegisteredDialog();
+    }
+  }
+
+  void _showFaceNotRegisteredDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            elevation: 0,
+            backgroundColor: AppColors.surface,
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFEF2F2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFFEF4444),
+                      size: 48,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Wajah Belum Terdaftar',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Anda belum bisa mengakses halaman presensi karena belum mendaftarkan wajah Anda, silahkan daftarkan wajah Anda terlebih dahulu.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: AppColors.onSurfaceVariant,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.of(dialogContext).pop();
+                        Navigator.of(context).pushAndRemoveUntil(
+                          MaterialPageRoute(
+                            builder: (context) => const DashboardPage(initialIndex: 3),
+                          ),
+                          (route) => false,
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: AppColors.onPrimary,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'Daftarkan Wajah',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showAttendanceLimitReachedDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            elevation: 0,
+            backgroundColor: AppColors.surface,
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFEFF6FF),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.task_alt_rounded,
+                      color: Color(0xFF2563EB),
+                      size: 48,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Presensi Hari Ini Selesai',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Anda sudah melakukan presensi masuk dan pulang untuk hari ini. Silakan lakukan presensi kembali di hari esok.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: AppColors.onSurfaceVariant,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.of(dialogContext).pop();
+                        Navigator.of(context).pushAndRemoveUntil(
+                          MaterialPageRoute(
+                            builder: (context) => const DashboardPage(initialIndex: 0),
+                          ),
+                          (route) => false,
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: AppColors.onPrimary,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'Kembali ke Dashboard',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _fetchLocation() async {
@@ -176,90 +431,273 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
     _scanController.dispose();
     _timer.cancel();
     _cameraController?.dispose();
+    _faceRecognitionService.dispose();
     super.dispose();
   }
 
-  void _handleCapture() {
+  Future<void> _handleCapture() async {
+    if (_isProcessing) return;
+
     setState(() {
       _isProcessing = true;
     });
 
-    Future.delayed(const Duration(milliseconds: 1500), () {
+    try {
+      if (_cameraController == null || !_cameraController!.value.isInitialized) {
+        throw Exception("Kamera belum siap.");
+      }
+
+      // 1. Take picture
+      final XFile pictureFile = await _cameraController!.takePicture();
+      final File imageFile = File(pictureFile.path);
+
+      // 2. ML Kit Face Detection
+      final inputImage = InputImage.fromFilePath(pictureFile.path);
+      final faceDetector = FaceDetector(
+        options: FaceDetectorOptions(
+          enableContours: false,
+          enableLandmarks: false,
+        ),
+      );
+      final List<Face> faces = await faceDetector.processImage(inputImage);
+      await faceDetector.close();
+
+      if (faces.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Wajah tidak terdeteksi! Pastikan wajah Anda terlihat jelas di kamera.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      if (faces.length > 1) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Terdapat lebih dari satu wajah! Pastikan hanya wajah Anda.'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+        return;
+      }
+
+      // 3. Extract Face Embedding
+      final newEmbedding = await _faceRecognitionService.predict(imageFile, faces.first.boundingBox);
+      if (newEmbedding == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Gagal mengekstrak fitur wajah. Silakan coba lagi.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      // 4. Fetch registered embedding from Firebase
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception("Pengguna tidak terautentikasi.");
+      }
+
+      final userSnapshot = await FirebaseDatabase.instance
+          .ref()
+          .child('users')
+          .child(user.uid)
+          .child('face_embedding')
+          .get()
+          .timeout(const Duration(seconds: 5));
+
+      if (!userSnapshot.exists || userSnapshot.value == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Data wajah terdaftar tidak ditemukan pada akun Anda!'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      final List rawRegistered = userSnapshot.value as List;
+      final List<double> registeredEmbedding = rawRegistered.map((e) => (e as num).toDouble()).toList();
+
+      // 5. Calculate Euclidean Distance
+      final double distance = _faceRecognitionService.euclideanDistance(newEmbedding, registeredEmbedding);
+      debugPrint('Face match distance: $distance');
+
+      if (distance >= 1.0) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Wajah tidak cocok dengan data akun terdaftar! Presensi ditolak.'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+
+      // 6. Face Matched! Save Attendance Record to Firebase Realtime Database
+      final dateKey = _getTodayKey();
+      final nowTimeStr = "${_formatTime(_currentTime)} WIB";
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+      final attRef = FirebaseDatabase.instance
+          .ref()
+          .child('attendances')
+          .child(user.uid)
+          .child(dateKey);
+
+      final attSnapshot = await attRef.get();
+      bool isCheckOut = false;
+
+      if (attSnapshot.exists && attSnapshot.value != null && attSnapshot.value is Map) {
+        final existingData = Map<String, dynamic>.from(attSnapshot.value as Map);
+        if (existingData['check_in_time'] != null && existingData['check_out_time'] == null) {
+          isCheckOut = true;
+          final int checkInMs = existingData['check_in_timestamp'] is int 
+              ? existingData['check_in_timestamp'] 
+              : nowMs;
+          final int diffMs = math.max(0, nowMs - checkInMs);
+          final duration = Duration(milliseconds: diffMs);
+          final int hours = duration.inHours;
+          final int minutes = duration.inMinutes.remainder(60);
+          final int seconds = duration.inSeconds.remainder(60);
+          final String totalStr = "${hours}H ${minutes}M ${seconds}S";
+
+          await attRef.update({
+            'check_out_time': nowTimeStr,
+            'check_out_timestamp': ServerValue.timestamp,
+            'total_work_time': totalStr,
+            'status': 'Selesai',
+          });
+        } else if (existingData['check_in_time'] != null && existingData['check_out_time'] != null) {
+          _showAttendanceLimitReachedDialog();
+          return;
+        }
+      } else {
+        // Perform Check-in
+        await attRef.set({
+          'check_in_time': nowTimeStr,
+          'check_in_timestamp': ServerValue.timestamp,
+          'check_out_time': null,
+          'check_out_timestamp': null,
+          'location_name': _placeName,
+          'location_address': _addressDetail,
+          'latitude': _currentPosition?.latitude,
+          'longitude': _currentPosition?.longitude,
+          'total_work_time': null,
+          'status': 'Hadir',
+        });
+      }
+
+      if (mounted) {
+        _showSuccessDialog(isCheckOut);
+      }
+    } catch (e) {
+      debugPrint('Error handling attendance capture: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Terjadi kesalahan saat memproses presensi: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
       if (mounted) {
         setState(() {
           _isProcessing = false;
         });
-        _showSuccessDialog();
       }
-    });
+    }
   }
 
-  void _showSuccessDialog() {
+  void _showSuccessDialog(bool isCheckOut) {
     showDialog(
       context: context,
-      barrierColor: AppColors.onSurface.withOpacity(0.4),
-      builder: (context) {
-        return Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          backgroundColor: AppColors.surface,
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    color: AppColors.secondaryContainer,
-                    shape: BoxShape.circle,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            backgroundColor: AppColors.surface,
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: AppColors.secondaryContainer,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.check_circle,
+                      color: AppColors.onSecondaryContainer,
+                      size: 48,
+                    ),
                   ),
-                  child: Icon(
-                    Icons.check_circle,
-                    color: AppColors.onSecondaryContainer,
-                    size: 48,
+                  const SizedBox(height: 24),
+                  Text(
+                    isCheckOut ? 'Presensi Pulang Berhasil!' : 'Presensi Masuk Berhasil!',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.onSurface,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'Absen Berhasil!',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.onSurface,
+                  const SizedBox(height: 8),
+                  Text(
+                    isCheckOut
+                        ? 'Presensi berhasil dicatat. Hati hati dijalan!'
+                        : 'Presensi berhasil dicatat. Selamat bekerja!',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 15,
+                      color: AppColors.onSurfaceVariant,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Wajah Anda berhasil diverifikasi. Selamat bekerja!',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: AppColors.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 32),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.primary,
-                      foregroundColor: AppColors.onPrimary,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                  const SizedBox(height: 32),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.of(dialogContext).pop();
+                        Navigator.of(context).pushAndRemoveUntil(
+                          MaterialPageRoute(builder: (context) => const DashboardPage(initialIndex: 0)),
+                          (route) => false,
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: AppColors.onPrimary,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'Lanjutkan',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                       ),
                     ),
-                    child: const Text(
-                      'Lanjutkan',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         );
@@ -273,6 +711,22 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
 
   @override
   Widget build(BuildContext context) {
+    if (_isCheckingFaceRegistration) {
+      return Scaffold(
+        backgroundColor: AppColors.surface,
+        body: const Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    if (!_hasRegisteredFace || _isAttendanceCompleted) {
+      return Scaffold(
+        backgroundColor: AppColors.surface,
+        body: const SizedBox.shrink(),
+      );
+    }
+
     return Scaffold(
       backgroundColor: AppColors.surface,
       body: SafeArea(
@@ -288,9 +742,9 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
                     children: [
                       _buildInstructionCard(),
                       const SizedBox(height: 24),
-                      _buildCameraPreview(),
-                      const SizedBox(height: 24),
                       _buildLocationInfo(),
+                      const SizedBox(height: 24),
+                      _buildCameraPreview(),
                       const SizedBox(height: 32),
                       _buildActionSection(),
                       const SizedBox(height: 32), // Adjusted padding since no nav bar
@@ -700,7 +1154,6 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
                                   ),
                                 ),
                               ),
-
                             ],
                           ),
               ),
@@ -713,6 +1166,9 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
   }
 
   Widget _buildActionSection() {
+    final bool isCheckOut = _todayAttendanceData?['check_in_time'] != null && _todayAttendanceData?['check_out_time'] == null;
+    final String buttonLabel = isCheckOut ? 'Presensi Pulang' : 'Presensi Masuk';
+
     return Column(
       children: [
         SizedBox(
@@ -728,11 +1184,11 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
                   )
                 : const Icon(Icons.face_retouching_natural),
             label: Text(
-              _isProcessing ? 'Memproses...' : 'Attendance',
+              _isProcessing ? 'Memproses Wajah...' : buttonLabel,
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
+              backgroundColor: isCheckOut ? const Color(0xFFD97706) : AppColors.primary,
               foregroundColor: AppColors.onPrimary,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -753,7 +1209,4 @@ class _AttendancePageState extends State<AttendancePage> with SingleTickerProvid
       ],
     );
   }
-
-
 }
-
